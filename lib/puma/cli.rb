@@ -102,7 +102,7 @@ module Puma
         :daemon => false,
         :before_worker_boot => [],
         :after_worker_boot => [],
-        :resuse_mode => true
+        :reuse_mode => true
       }
 
       @parser = OptionParser.new do |o|

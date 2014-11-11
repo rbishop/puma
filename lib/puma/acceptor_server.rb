@@ -72,12 +72,15 @@ module Puma
     end
 
     def run
+      BasicSocket.do_not_reverse_lookup = true
+
       @acceptor_pool = AcceptorPool.new(@min_threads, 
                                         @max_threads, 
                                         @host,
                                         @port, 
                                         @binder,
                                         @check,
+                                        @events,
                                         IOBuffer) do |client, buffer|
         process_now = false
 
@@ -111,11 +114,18 @@ module Puma
 
       @events.fire :state, :running
       
-      @thread_pool
+      @acceptor_pool
     end
 
-    def join
-      @thread_pool.map(&:join)
+    def cork_socket(socket)
+    end
+
+    def uncork_socket(socket)
+    end
+
+    def inherit_binder(bind)
+      @binder = bind
+      @own_binder = false
     end
 
     def handle_check
@@ -230,7 +240,9 @@ module Puma
       # intermediary acting on behalf of the actual source client."
       #
 
-      addr = client.peeraddr.last
+      #addr = client.peeraddr.last
+      #addr = client.remote_address.getnameinfo
+      addr = []
 
       # Set unix socket addrs to localhost
       addr = "127.0.0.1" if addr.empty?

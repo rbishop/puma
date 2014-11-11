@@ -127,7 +127,8 @@ module Puma
       min_t = @options[:min_threads]
       max_t = @options[:max_threads]
 
-      server = Puma::Server.new app, @cli.events, @options
+      #server = Puma::Server.new app, @cli.events, @options
+      server = Puma::AcceptorServer.new app, @cli.events, @options
       server.min_threads = min_t
       server.max_threads = max_t
       server.inherit_binder @cli.binder
