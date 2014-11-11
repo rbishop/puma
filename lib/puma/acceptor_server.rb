@@ -587,5 +587,4 @@ module Puma
     end
     private :fast_write
   end
-  end
 end

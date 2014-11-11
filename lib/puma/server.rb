@@ -127,7 +127,7 @@ module Puma
       @thread_pool and @thread_pool.backlog
     end
 
-     running
+    def running
       @thread_pool and @thread_pool.spawned
     end
     

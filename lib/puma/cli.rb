@@ -2,6 +2,7 @@ require 'optparse'
 require 'uri'
 
 require 'puma/server'
+require 'puma/acceptor_server'
 require 'puma/const'
 require 'puma/configuration'
 require 'puma/binder'
@@ -100,7 +101,8 @@ module Puma
         :workers => 0,
         :daemon => false,
         :before_worker_boot => [],
-        :after_worker_boot => []
+        :after_worker_boot => [],
+        :resuse_mode => true
       }
 
       @parser = OptionParser.new do |o|

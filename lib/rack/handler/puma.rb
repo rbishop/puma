@@ -37,6 +37,7 @@ module Rack
         puts "* Min threads: #{min}, max threads: #{max}"
         puts "* Environment: #{ENV['RACK_ENV']}"
         puts "* Listening on tcp://#{options[:Host]}:#{options[:Port]}"
+        puts options.inspect
 
         if options[:reuse_mode]
           server.host = options[:Host]
