@@ -2,6 +2,7 @@ require 'rack'
 require 'stringio'
 
 require 'puma/thread_pool'
+require 'puma/acceptor_pool'
 require 'puma/const'
 require 'puma/events'
 require 'puma/null_io'
@@ -24,14 +25,10 @@ end
 require 'socket'
 
 module Puma
-
-  # The HTTP Server itself. Serves out a single Rack app.
-  class Server
-
+  # It was easier to create an entirely separate server class for now
+  class AcceptorServer
     include Puma::Const
-    extend  Puma::Delegation
 
-    attr_reader :thread
     attr_reader :events
     attr_accessor :app
 
@@ -40,15 +37,9 @@ module Puma
     attr_accessor :persistent_timeout
     attr_accessor :auto_trim_time
     attr_accessor :first_data_timeout
+    attr_accessor :host
+    attr_accessor :port
 
-    # Create a server for the rack app +app+.
-    #
-    # +events+ is an object which will be called when certain error events occur
-    # to be handled. See Puma::Events for the list of current methods to implement.
-    #
-    # Server#run returns a thread that you can join on to wait for the server
-    # to do it's work.
-    #
     def initialize(app, events=Events.stdio, options={})
       @app = app
       @events = events
@@ -61,8 +52,8 @@ module Puma
       @max_threads = 16
       @auto_trim_time = 1
 
-      @thread = nil
-      @thread_pool = nil
+      @host
+      @acceptor_pool = nil
 
       @persistent_timeout = PERSISTENT_TIMEOUT
 
@@ -80,164 +71,14 @@ module Puma
       @mode = :http
     end
 
-    attr_accessor :binder, :leak_stack_on_error
-
-    forward :add_tcp_listener,  :@binder
-    forward :add_ssl_listener,  :@binder
-    forward :add_unix_listener, :@binder
-
-    def inherit_binder(bind)
-      @binder = bind
-      @own_binder = false
-    end
-
-    def tcp_mode!
-      @mode = :tcp
-    end
-
-    # On Linux, use TCP_CORK to better control how the TCP stack
-    # packetizes our stream. This improves both latency and throughput.
-    #
-    if RUBY_PLATFORM =~ /linux/
-      # 6 == Socket::IPPROTO_TCP
-      # 3 == TCP_CORK
-      # 1/0 == turn on/off
-      def cork_socket(socket)
-        begin
-          socket.setsockopt(6, 3, 1) if socket.kind_of? TCPSocket
-        rescue IOError, SystemCallError
-        end
-      end
-
-      def uncork_socket(socket)
-        begin
-          socket.setsockopt(6, 3, 0) if socket.kind_of? TCPSocket
-        rescue IOError, SystemCallError
-        end
-      end
-    else
-      def cork_socket(socket)
-      end
-
-      def uncork_socket(socket)
-      end
-    end
-
-    def backlog
-      @thread_pool and @thread_pool.backlog
-    end
-
-     running
-      @thread_pool and @thread_pool.spawned
-    end
-    
-    # Lopez Mode == raw tcp apps
-
-    def run_lopez_mode(background=true)
-      @thread_pool = ThreadPool.new(@min_threads,
-                                    @max_threads,
-                                    Hash) do |client, tl|
-
-        io = client.to_io
-        addr = io.peeraddr.last
-
-        if addr.empty?
-          # Set unix socket addrs to localhost
-          addr = "127.0.0.1:0"
-        else
-          addr = "#{addr}:#{io.peeraddr[1]}"
-        end
-
-        env = { 'thread' => tl, REMOTE_ADDR => addr }
-
-        begin
-          @app.call env, client.to_io
-        rescue Object => e
-          STDERR.puts "! Detected exception at toplevel: #{e.message} (#{e.class})"
-          STDERR.puts e.backtrace
-        end
-
-        client.close unless env['detach']
-      end
-
-      @events.fire :state, :running
-
-      if background
-        @thread = Thread.new { handle_servers_lopez_mode }
-        return @thread
-      else
-        handle_servers_lopez_mode
-      end
-    end
-
-    def handle_servers_lopez_mode
-      begin
-        check = @check
-        sockets = [check] + @binder.ios
-        pool = @thread_pool
-
-        while @status == :run
-          begin
-            ios = IO.select sockets
-            ios.first.each do |sock|
-              if sock == check
-                break if handle_check
-              else
-                begin
-                  if io = sock.accept_nonblock
-                    client = Client.new io, nil
-                    pool << client
-                  end
-                rescue SystemCallError
-                end
-              end
-            end
-          rescue Errno::ECONNABORTED
-            # client closed the socket even before accept
-            client.close rescue nil
-          rescue Object => e
-            @events.unknown_error self, e, "Listen loop"
-          end
-        end
-
-        @events.fire :state, @status
-
-        graceful_shutdown if @status == :stop || @status == :restart
-
-      rescue Exception => e
-        STDERR.puts "Exception handling servers: #{e.message} (#{e.class})"
-        STDERR.puts e.backtrace
-      ensure
-        @check.close
-        @notify.close
-
-        if @status != :restart and @own_binder
-          @binder.close
-        end
-      end
-
-      @events.fire :state, :done
-    end
-    # Runs the server.
-    #
-    # If +background+ is true (the default) then a thread is spun
-    # up in the background to handle requests. Otherwise requests
-    # are handled synchronously.
-    #
-    def run(background=true)
-      BasicSocket.do_not_reverse_lookup = true
-
-      @events.fire :state, :booting
-
-      @status = :run
-
-      if @mode == :tcp
-        return run_lopez_mode(background)
-      end
-
-      @thread_pool = ThreadPool.new(@min_threads,
-                                    @max_threads,
-                                    IOBuffer) do |client, buffer|
+    def run
+      @acceptor_pool = AcceptorPool.new(@min_threads, 
+                                        @max_threads, 
+                                        @host,
+                                        @port, 
+                                        @binder,
+                                        @check,
+                                        IOBuffer) do |client, buffer|
         process_now = false
 
         begin
@@ -259,76 +100,24 @@ module Puma
         end
       end
 
-      @reactor = Reactor.new self, @thread_pool
+      @reactor = Reactor.new self, @acceptor_pool
 
       @reactor.run_in_thread
 
-      if @auto_trim_time
-        @thread_pool.auto_trim!(@auto_trim_time)
-      end
+      # Re-add trimming later
+      #if @auto_trim_time
+      #  @thread_pool.auto_trim!(@auto_trim_time)
+      #end
 
       @events.fire :state, :running
-
-      if background
-        @thread = Thread.new { handle_servers }
-        return @thread
-      else
-        handle_servers
-      end
+      
+      @thread_pool
     end
 
-    def handle_servers
-      begin
-        check = @check
-        sockets = [check] + @binder.ios
-        pool = @thread_pool
-
-        while @status == :run
-          begin
-            ios = IO.select sockets
-            ios.first.each do |sock|
-              if sock == check
-                break if handle_check
-              else
-                begin
-                  if io = sock.accept_nonblock
-                    client = Client.new io, @binder.env(sock)
-                    pool << client
-                  end
-                rescue SystemCallError
-                end
-              end
-            end
-          rescue Errno::ECONNABORTED
-            # client closed the socket even before accept
-            client.close rescue nil
-          rescue Object => e
-            @events.unknown_error self, e, "Listen loop"
-          end
-        end
-
-        @events.fire :state, @status
-
-        graceful_shutdown if @status == :stop || @status == :restart
-        @reactor.clear! if @status == :restart
-
-        @reactor.shutdown
-      rescue Exception => e
-        STDERR.puts "Exception handling servers: #{e.message} (#{e.class})"
-        STDERR.puts e.backtrace
-      ensure
-        @check.close
-        @notify.close
-
-        if @status != :restart and @own_binder
-          @binder.close
-        end
-      end
-
-      @events.fire :state, :done
+    def join
+      @thread_pool.map(&:join)
     end
 
-    # :nodoc:
     def handle_check
       cmd = @check.read(1)
 
@@ -797,5 +586,6 @@ module Puma
       end
     end
     private :fast_write
+  end
   end
 end
